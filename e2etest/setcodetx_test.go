@@ -38,8 +38,13 @@ func TestSetCodeTx_E2E(t *testing.T) {
 	cfg.Plugins[config.GatewayPlugin] = true
 	cfg.Chain.EnableAsyncIndexWrite = false
 	cfg.Genesis.XinguBetaBlockHeight = 1
-	cfg.Genesis.ToBeEnabledBlockHeight = 5 // enable setcode tx
+	cfg.Genesis.YapBlockHeight = 5 // enable setcode tx
 	cfg.Genesis.InitBalanceMap[sender] = unit.ConvertIotxToRau(1000000).String()
+	// Configure blacklist for testing EIP-7702 blacklist enforcement
+	blacklistedAccount := 28
+	cfg.Genesis.InitBalanceMap[identityset.Address(blacklistedAccount).String()] = unit.ConvertIotxToRau(1000000).String()
+	cfg.ActPool.BlackList = []string{identityset.Address(blacklistedAccount).String()}
+	cfg.ActPool.BlackListActiveHeight = cfg.Genesis.YapBlockHeight + 1
 	testutil.NormalizeGenesisHeights(&cfg.Genesis.Blockchain)
 	test := newE2ETest(t, cfg)
 	chainID := cfg.Chain.ID
@@ -168,7 +173,7 @@ func TestSetCodeTx_E2E(t *testing.T) {
 		},
 	})
 	var (
-		skipBlocks           = cfg.Genesis.ToBeEnabledBlockHeight - test.cs.Blockchain().TipHeight()
+		skipBlocks           = cfg.Genesis.YapBlockHeight - test.cs.Blockchain().TipHeight()
 		accountContract      = 7
 		candOwnerID          = 3
 		stakeAmount          = unit.ConvertIotxToRau(10000)
@@ -283,6 +288,31 @@ func TestSetCodeTx_E2E(t *testing.T) {
 			},
 		},
 	})
+
+	// Test blacklist: blacklisted account's authorization should be skipped (not applied)
+	auth, err = types.SignSetCode(identityset.PrivateKey(blacklistedAccount).EcdsaPrivateKey().(*ecdsa.PrivateKey), types.SetCodeAuthorization{
+		ChainID: *uint256.NewInt(uint64(evmNetworkID)),
+		Address: contractV3AddressEth,
+		Nonce:   test.nonceMgr.pop(identityset.Address(blacklistedAccount).String()),
+	})
+	r.NoError(err)
+	test.run([]*testcase{
+		{
+			name: "blacklisted account setcode skipped",
+			act: &actionWithTime{
+				mustNoErr(newSetCodeTxWeb3(test.nonceMgr.pop(sender), senderSK, identityset.Address(blacklistedAccount).String(), big.NewInt(0), nil, []types.SetCodeAuthorization{auth})),
+				time.Now(),
+			},
+			blockExpect: func(test *e2etest, blk *block.Block, err error) {
+				r.NoError(err)
+				// Transaction succeeds but authorization is skipped for blacklisted account
+				// Verify code is NOT set on the blacklisted account
+				code, err := test.ethcli.CodeAt(context.Background(), common.BytesToAddress(identityset.Address(blacklistedAccount).Bytes()), nil)
+				r.NoError(err)
+				r.Equal(0, len(code), "code should not be set on blacklisted account")
+			},
+		},
+	})
 }
 
 // TestSetCodeTx_BatchTransfer tests the batch transfer scenario using EIP-7702 with Multicall
@@ -298,7 +328,7 @@ func TestSetCodeTx_BatchTransfer(t *testing.T) {
 	cfg.Plugins[config.GatewayPlugin] = true
 	cfg.Chain.EnableAsyncIndexWrite = false
 	cfg.Genesis.XinguBetaBlockHeight = 1
-	cfg.Genesis.ToBeEnabledBlockHeight = 1 // enable setcode tx from the start
+	cfg.Genesis.YapBlockHeight = 1 // enable setcode tx from the start
 	cfg.Genesis.InitBalanceMap[sender] = unit.ConvertIotxToRau(1000000).String()
 	testutil.NormalizeGenesisHeights(&cfg.Genesis.Blockchain)
 	test := newE2ETest(t, cfg)
@@ -463,7 +493,7 @@ func TestSetCodeTx_ERC20ApproveAndTransfer(t *testing.T) {
 	cfg.Plugins[config.GatewayPlugin] = true
 	cfg.Chain.EnableAsyncIndexWrite = false
 	cfg.Genesis.XinguBetaBlockHeight = 1
-	cfg.Genesis.ToBeEnabledBlockHeight = 1 // enable setcode tx from the start
+	cfg.Genesis.YapBlockHeight = 1 // enable setcode tx from the start
 	cfg.Genesis.InitBalanceMap[sender] = unit.ConvertIotxToRau(1000000).String()
 	testutil.NormalizeGenesisHeights(&cfg.Genesis.Blockchain)
 	test := newE2ETest(t, cfg)
@@ -692,7 +722,7 @@ func TestSetCodeTx_GasSponsorship(t *testing.T) {
 	cfg.Plugins[config.GatewayPlugin] = true
 	cfg.Chain.EnableAsyncIndexWrite = false
 	cfg.Genesis.XinguBetaBlockHeight = 1
-	cfg.Genesis.ToBeEnabledBlockHeight = 1 // enable setcode tx from the start
+	cfg.Genesis.YapBlockHeight = 1 // enable setcode tx from the start
 
 	// Sponsor has native tokens to pay for gas
 	sponsor := identityset.Address(10)
@@ -925,7 +955,7 @@ func TestEstimateGas(t *testing.T) {
 	r.NoError(err)
 	cfg.Chain.HistoryIndexPath = historyIndexPath
 	cfg.Genesis.XinguBetaBlockHeight = 1
-	cfg.Genesis.ToBeEnabledBlockHeight = 5 // enable setcode tx
+	cfg.Genesis.YapBlockHeight = 5 // enable setcode tx
 	cfg.Genesis.InitBalanceMap[sender] = unit.ConvertIotxToRau(1000000).String()
 	testutil.NormalizeGenesisHeights(&cfg.Genesis.Blockchain)
 	test := newE2ETest(t, cfg)
@@ -969,7 +999,7 @@ func TestEstimateGas(t *testing.T) {
 	test.run([]*testcase{
 		{
 			name:    "deploy_contract_v3",
-			preActs: genTransfers(int(cfg.Genesis.ToBeEnabledBlockHeight)),
+			preActs: genTransfers(int(cfg.Genesis.YapBlockHeight)),
 			acts: []*actionWithTime{
 				{mustNoErr(action.SignedExecution("", identityset.PrivateKey(contractCreator), test.nonceMgr.pop(identityset.Address(contractCreator).String()), big.NewInt(0), 2*gasLimit, gasPrice, append(bytecodeV3, mustCallDataV3("", minAmount, contractV2AddressEth)...), action.WithChainID(chainID))), time.Now()},
 				{mustNoErr(action.SignedExecution(contractV3Address, identityset.PrivateKey(contractCreator), test.nonceMgr.pop(identityset.Address(contractCreator).String()), big.NewInt(0), gasLimit, gasPrice, mustCallDataV3("setBeneficiary(address)", common.BytesToAddress(identityset.Address(beneficiaryID).Bytes())), action.WithChainID(chainID))), time.Now()},
@@ -1048,7 +1078,7 @@ func TestEstimateGas(t *testing.T) {
 		},
 		// big calldata before prague
 		{
-			blockNumber: big.NewInt(int64(cfg.Genesis.ToBeEnabledBlockHeight - 2)),
+			blockNumber: big.NewInt(int64(cfg.Genesis.YapBlockHeight - 2)),
 			call: ethereum.CallMsg{
 				From:     common.BytesToAddress(assertions.MustNoErrorV(address.FromString(sender)).Bytes()),
 				To:       &contractV2AddressEth,
@@ -1060,7 +1090,7 @@ func TestEstimateGas(t *testing.T) {
 		},
 		// big calldata after prague
 		{
-			blockNumber: big.NewInt(int64(cfg.Genesis.ToBeEnabledBlockHeight)),
+			blockNumber: big.NewInt(int64(cfg.Genesis.YapBlockHeight)),
 			call: ethereum.CallMsg{
 				From:     common.BytesToAddress(assertions.MustNoErrorV(address.FromString(sender)).Bytes()),
 				To:       &contractV2AddressEth,

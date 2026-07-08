@@ -44,19 +44,20 @@ var (
 
 // Protocol defines the protocol of handling executions
 type Protocol struct {
-	depositGas protocol.DepositGas
-	addr       address.Address
+	depositGas    protocol.DepositGas
+	addr          address.Address
+	isBlackListed evm.IsBlackListedFunc
 }
 
 // NewProtocol instantiates the protocol of exeuction
 // TODO: remove unused getBlockHash and getBlockTime
-func NewProtocol(_ evm.GetBlockHash, depositGas protocol.DepositGas, _ evm.GetBlockTime) *Protocol {
+func NewProtocol(_ evm.GetBlockHash, depositGas protocol.DepositGas, _ evm.GetBlockTime, isBlackListed evm.IsBlackListedFunc) *Protocol {
 	h := hash.Hash160b([]byte(_protocolID))
 	addr, err := address.FromBytes(h[:])
 	if err != nil {
 		log.L().Panic("Error when constructing the address of vote protocol", zap.Error(err))
 	}
-	return &Protocol{depositGas: depositGas, addr: addr}
+	return &Protocol{depositGas: depositGas, addr: addr, isBlackListed: isBlackListed}
 }
 
 // FindProtocol finds the registered protocol from registry
@@ -84,7 +85,7 @@ func (p *Protocol) CreatePreStates(ctx context.Context, sm protocol.StateManager
 		return nil
 	}
 	// deploy the history storage contract at block
-	if blkCtx.BlockHeight == g.ToBeEnabledBlockHeight {
+	if blkCtx.BlockHeight == g.YapBlockHeight {
 		if err := p.deployHistoryBlockStorageContract(ctx, sm); err != nil {
 			return err
 		}
@@ -116,9 +117,16 @@ func (p *Protocol) systemCallContext(ctx context.Context, sm protocol.StateManag
 		DepositGasFunc: func(ctx context.Context, sm protocol.StateManager, i *big.Int, do ...protocol.DepositOption) ([]*action.TransactionLog, error) {
 			return nil, nil
 		},
-		GetBlockHash: bcCtx.GetBlockHash,
-		GetBlockTime: bcCtx.GetBlockTime,
+		GetBlockHash:  bcCtx.GetBlockHash,
+		GetBlockTime:  bcCtx.GetBlockTime,
+		IsBlackListed: p.isBlackListed,
 	})
+	// Strip the EVM tracer so system-level EVM calls (e.g. setPreviousBlockHash)
+	// don't pollute the tracing callstack used for user transaction traces.
+	if vmCfg, ok := protocol.GetVMConfigCtx(ctx); ok && vmCfg.Tracer != nil {
+		vmCfg.Tracer = nil
+		ctx = protocol.WithVMConfigCtx(ctx, vmCfg)
+	}
 	return ctx, nil
 }
 
@@ -174,6 +182,7 @@ func (p *Protocol) Handle(ctx context.Context, elp action.Envelope, sm protocol.
 		GetBlockHash:   bcCtx.GetBlockHash,
 		GetBlockTime:   bcCtx.GetBlockTime,
 		DepositGasFunc: p.depositGas,
+		IsBlackListed:  p.isBlackListed,
 	})
 	_, receipt, err := evm.ExecuteContract(ctx, sm, elp)
 
